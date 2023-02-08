@@ -24,37 +24,55 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+import argparse
+
+import gradio as gr
 import numpy as np
-import time
-from tritonclient.utils import *
+import requests
+import tritonclient.grpc as grpcclient
 from PIL import Image
-import tritonclient.http as httpclient
+from tritonclient.utils import np_to_triton_dtype
+import PIL
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--triton_url", default="20.231.248.160:8001")
+args = parser.parse_args()
+
+client = grpcclient.InferenceServerClient(url=f"{args.triton_url}")
 
 
-def main():
-    client = httpclient.InferenceServerClient(url="localhost:8000")
-
-    prompt = "Pikachu with a hat, 4k, 3d render"
+def generate(prompt):
     text_obj = np.array([prompt], dtype="object").reshape((-1, 1))
 
-    input_text = httpclient.InferInput("prompt", text_obj.shape,
+    url = "https://raw.githubusercontent.com/timothybrooks/instruct-pix2pix/main/imgs/example.jpg"
+    image = PIL.Image.open(requests.get(url, stream=True).raw)
+    image = PIL.ImageOps.exif_transpose(image)
+    image = image.convert("RGB")
+    image_array = np.uint8(image)
+
+    input_text = grpcclient.InferInput("prompt", text_obj.shape,
                                        np_to_triton_dtype(text_obj.dtype))
     input_text.set_data_from_numpy(text_obj)
 
-    output_img = httpclient.InferRequestedOutput("generated_image")
+    input_image = grpcclient.InferInput("image", image_array.shape,
+                                       np_to_triton_dtype(image_array.dtype))
+    input_image.set_data_from_numpy(image_array)
 
-    query_response = client.infer(model_name="pipeline",
-                                  inputs=[input_text],
-                                  outputs=[output_img])
+    output_img = grpcclient.InferRequestedOutput("generated_image")
 
-    image = query_response.as_numpy("generated_image")
-    im = Image.fromarray(np.squeeze(image.astype(np.uint8)))
-    im.save("generated_image2.jpg")
+    response = client.infer(model_name="pipeline_pix2pix",
+                            inputs=[(input_text, input_image)],
+                            outputs=[output_img])
+    resp_img = response.as_numpy("generated_image")
+    print(resp_img.shape)
+    im = Image.fromarray(np.squeeze(resp_img.astype(np.uint8)))
+    return im
 
 
-if __name__ == "__main__":
-    start = time.time()
-    main()
-    end = time.time()
+with gr.Blocks() as app:
+    prompt = gr.Textbox(label="Prompt")
+    submit_btn = gr.Button("Generate")
+    img_output = gr.Image().style(height=512)
+    submit_btn.click(fn=generate, inputs=prompt, outputs=img_output)
 
-    print("Time taken:", end - start)
+app.launch(server_name="0.0.0.0")
